@@ -440,8 +440,8 @@ p_40_v <- add_fh(fh_40, p_40_v)
 #==========================================
 #symptom_type is a dataframe with the category that each read code falls into
 #it's either 1 or NA for each category. change it to 1 or 0, then convert to an integer, so it can be used for maths later:
-
-#TODO: insert this later it's messing up github formatting :(
+symptom_type[,-1] <- sapply(symptom_type[,-1], function(x) as.integer(x))
+symptom_type[is.na(symptom_type)] <- 0
 
 #add which symptom(s) each participant had as a variable:
 add_symptoms <- function(p_xx_v, p_sym_filtered_xx) {
@@ -829,4 +829,80 @@ rocauc_jump <- function(lrp_xx, p_xx_v) {
 
 rocauc_irm_40_e <- rocauc_jump(lrp_40_e[c(1:4,6:8)],p_40_ve)
 rocauc_irm_40_m <- rocauc_jump(lrp_40_m[c(1:6)],p_40_vm)
+
+#8B plot the increase in ROCAUC as more variables are added to risk model
+#======================================================================
+#create data frame to use in plot:
+#----------------------------------
+rocauc_frame <- function(rocauc_irm) {
+  rocaucs_list <- c(0.5)
+  UB_list <- c(0.5)
+  LB_list <- c(0.5)
+  for (i in 1:length(rocauc_irm)) {
+    rocaucs_list <- c(rocaucs_list, rocauc_irm[[i]]$ROC)
+    UB_list <- c(UB_list, rocauc_irm[[i]]$UB)
+    LB_list <- c(LB_list, rocauc_irm[[i]]$LB)
+  }
+  aucs <- data.frame(aucs = rocaucs_list,
+                     var = c(0:length(rocauc_irm)),
+                     UB = UB_list,
+                     LB = LB_list)
+  return(aucs)
+}
+
+rocauc_frame_e <- rocauc_frame(rocauc_irm_40_e)
+rocauc_frame_m <- rocauc_frame(rocauc_irm_40_m)
+
+#plot:
+#----
+rocauc_plot_m <- ggplot(data=rocauc_frame_m, aes(x=var, y=aucs, ymin=LB, ymax=UB)) +
+  geom_point(colour = '#00C896', size=3) + geom_line(linetype = "dashed") + geom_errorbar(width=0.1) +
+  HGtheme + xlab("variables added to integrated risk model") + ylab("ROC AUC") +
+  scale_x_continuous(breaks=0:6, labels=c("none","age at\nfirst symptom", "& PRS", "& sex",
+                                          "& rectal\nbloodloss","& change in\nbowel habits",
+                                          "& smoking\nstatus")) +
+  scale_y_continuous(breaks=seq(0.5,0.85,by=0.05)) + theme(plot.margin = unit(c(5.5, 5.5, 20, 30), "points"))
+
+rocauc_plot_e <- ggplot(data=rocauc_frame_e, aes(x=var, y=aucs, ymin=LB, ymax=UB)) +
+  geom_point(colour = '#00C896', size=3) + geom_line(linetype = "dashed") + geom_errorbar(width=0.1) +
+  HGtheme + xlab("variables added to integrated risk model") + ylab("ROC AUC") +
+  scale_x_continuous(breaks=0:7, labels=c("none","age at\nfirst symptom", "& rectal\nbloodloss", "& PRS",
+                                          "& sex","& change in\nbowel habits",
+                                          "& smoking\nstatus","& waist\ncircumference")) +
+  scale_y_continuous(breaks=seq(0.5,0.85,by=0.05)) + theme(plot.margin = unit(c(5.5, 5.5, 20, 30), "points"))
+
+#9 Test different models with Akaike information criterion (AIC)
+#================================================================
+#get all possible formulas for 7 variables:
+vlen <- length(lrp_40_e[c(1:4,6:8)])
+form_l <- sapply((1:vlen), function(x) combn(names(lrp_40_e[c(1:4,6:8)]), x))
+form_c <- character()
+for (i in 1:vlen) {
+  for (j in 1:ncol(form_l[[i]])) {
+    form_c <- c(form_c, paste0('~', paste0(form_l[[i]][,j], collapse = '+')))
+  }
+} #returns 127 combinations
+
+#create a list of linear regression models for the 127 formulas:
+models <- list(lm(paste0('case',form_c[1]), data = p_40_ve))
+for (i in 2:length(form_c)) {
+  models[[length(models)+1]] <- lm(paste0('case',form_c[i]), data = p_40_ve)
+}
+
+#Apply AIC
+#----------
+#install.packages('AICcmodavg')
+#library(AICcmodavg)
+                 
+aic_models <- aictab(cand.set = models, modnames = form_c)
+
+
+#10 Conclusion and model ROCAUCs
+#=================================
+#ROCAUC and AIC methods agree best risk model is ~sex+sym_age+grs+rectal_bloodloss+change_bowel_habit
+#Get ROCAUC of this model:
+rocauc('case~sex+sym_age+grs+rectal_bloodloss+change_bowel_habit', p_40_v, TRUE)
+
+#And of GRS alone:
+rocauc('case~grs', p_40_ve, TRUE)
 
