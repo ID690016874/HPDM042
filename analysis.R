@@ -156,20 +156,296 @@ symptom_type <- symptom_type[!duplicated(symptom_type$readcode),]
 
 #2A. Find UKBB participants with symptoms
 #=======================================
-devtools::source_url("https://raw.githubusercontent.com/hdg204/Rdna-nexus/main/install.R")
-
 p_sym <- read_GP(sym_codes_filtered$code)
 #number each symptom record, as there are multiple records per participant
 p_sym$no <- 1:nrow(p_sym)
 
-#2. Any participants with a read code for haemoglobin level were included
+#2B. Any participants with a read code for haemoglobin level were included
 #Exclude participants with normal haemoglobin level or no measurement
 #======================================================================
 #df of participants with haemoglobin level recorded:
 exclude <- p_sym[p_sym$read_2 %in% c('44TC.','XaBLm') | p_sym$read_3 %in% c('44TC.','XaBLm'),]
 
-#add sex of participants:
-UKBB_var <- read.csv('00_participant.csv')
-exclude <- left_join(exclude, UKBB_var[,c(1,5)])
-exclude$value1 <- as.numeric(exclude$value1)
+#import a table including participant IDs + all the lifestyle variables/chacteristics assessed in this study
+#table was generated on the DNA Nexus UKBB research analysis platform
+UKBB_var <- read.csv('00_participant.csv') 
 
+#use the above participant table to add participant sex to haemoglobin df:
+exclude <- left_join(exclude, UKBB_var[,c(1,5)]) #(sex was in column 5 of the table)
+
+#find participants with low haemoglobin levels ('low' is sex-dependent)
+#also only include participants with haemoglobin > 1 as < 1 may be a percentage:
+exclude$value1 <- as.numeric(exclude$value1) #convert haemoglobin measure to numeric
+include <- exclude[(exclude$p31 == 'Female' & exclude$value1 < 11 & exclude$value1 > 1),]
+include <- rbind(include, exclude[(exclude$p31 == 'Male' & exclude$value1 < 13 & exclude$value1 > 1),])
+include <- include[!is.na(include$eid),]
+#remove any participants with a % symbol in the 'value3' column as these are likely to be percentage measurements
+include <- include[!(include$value3 == '%'),]
+
+#remove participant symptom records from p_sym, if the 'symptom' was haemoglobin level that is either healthy or not recorded:
+exclude <- exclude[!(exclude$no %in% include$no),]
+p_sym <- p_sym[!(p_sym$no %in% exclude$no),]
+
+#2C. Exclude any symptoms which occurred before participants were 40 or 50
+#==================================================================
+#add date of birth for all participants:
+UKBB_var$dob <- 15 #actual DoB unknown for privacy reasons. assume 15th of each month to minimise error
+UKBB_var$dob <- apply(UKBB_var[,c(22,3,4)], 1, paste, collapse = "-") #col 3 in UKBB_var table is birth month, col 4 is birth year, col 22 is the new 'dob' column added in the above line
+UKBB_var$dob <- as.Date(UKBB_var$dob, format = "%d-%B-%Y")
+p_sym <- left_join(p_sym, UKBB_var[,c(1,22)])
+
+#add age at which symptom occurred
+library(lubridate)
+p_sym$sym_age <- lubridate::time_length(difftime(p_sym$event_dt,
+                                                 p_sym$dob),
+                                        "years")
+p_sym$sym_age <- as.integer(p_sym$sym_age)  
+
+#version 1: exclude symptoms which occurred before participants were 50:
+p_sym_50 <- p_sym[p_sym$sym_age >= 50,]
+#version 2: exclude symptoms which occurred before participants were 40:
+p_sym_40 <- p_sym[p_sym$sym_age >= 40,]
+
+#2D. Include only symptom with earliest date for each patient
+#===========================================================
+get_earliest_symptom <- function(p_sym_n) {
+  p_sym_filtered <- p_sym_n
+  p_sym_filtered[,4:5][p_sym_filtered[,4:5] == ''] <- NA #cols 4 and 5 of the participant symptom records table contain read 2 and 3 codes
+  p_sym_filtered <- p_sym_filtered %>%
+    group_by(eid) %>%
+    #get earliest symptom for each patient
+    slice_min(event_dt) %>%
+    #remove duplicate records (where same symptoms appears multiple times on same date)
+    distinct(eid, read_2, read_3, .keep_all = TRUE) 
+  p_sym_filtered <- p_sym_filtered[,-9]
+  
+  return(p_sym_filtered)
+}
+
+p_sym_filtered_00 <- get_earliest_symptom(p_sym) #no age threshold
+p_sym_filtered_40 <- get_earliest_symptom(p_sym_40) #age threshold for earliest symptom = 40
+p_sym_filtered_50 <- get_earliest_symptom(p_sym_50) #age threshold for earliest symptom = 50
+
+#3A. For symptomatic participants, find earliest occurrence of CRC
+#================================================================
+#get read 2/3 codes and descriptions for CRC
+crc_codes_gp <- find_read_codes(c('B13','B14','B575','B1z','B803','B804','B902','BB5N'))
+crc_codes_gp_filtered <- crc_codes_gp[! crc_codes_gp$code %in% c('B1z..','B1z0.','B1zy.','B1zz.','B902.','B9020','B902z'),]
+
+#list ICD10 cancer registry codes for CRC
+crc_codes_icd10_filtered <- c('C18','C19','C20','C21')
+
+#find earliest occurrence of CRC for each patient
+#below function adapted from Harry Green's function first_occurence
+first_occurence_age <- function(ICD10='',GP='',OPCS='',cancer='',
+                                age_threshold=0, p=p_sym_filtered_00) {
+  ICD10_records=read_ICD10(ICD10)%>%mutate(date=epistart)%>%select(eid,date)%>%mutate(source='HES')
+  OPCS_records=read_OPCS(OPCS)%>%mutate(date=opdate)%>%select(eid,date)%>%mutate(source='OPCS')
+  GP_records=read_GP(GP)%>%mutate(date=event_dt)%>%select(eid,date)%>%mutate(source='GP')
+  cancer_records=read_cancer(cancer)%>%select(eid,date)%>%mutate(source='Cancer_Registry')
+  all_records=rbind(ICD10_records,OPCS_records)%>%rbind(GP_records)%>%rbind(cancer_records)%>%mutate(date=as.Date(date))
+  all_records=left_join(all_records,p[,c(1,9)])
+  all_records$crc_age=lubridate::time_length(difftime(all_records$date, all_records$dob), "years")
+  all_records=filter(all_records, crc_age >= age_threshold)
+  all_records=all_records%>%group_by(eid)%>%top_n(-1,date)%>%distinct()
+  return(all_records)
+}
+
+crc_00 <- first_occurence_age(ICD10 = crc_codes_icd10_filtered,
+                              GP = crc_codes_gp_filtered$code,
+                              cancer = crc_codes_icd10_filtered)
+crc_40 <- first_occurence_age(ICD10 = crc_codes_icd10_filtered,
+                              GP = crc_codes_gp_filtered$code,
+                              cancer = crc_codes_icd10_filtered,
+                              age_threshold = 40,
+                              p = p_sym_filtered_40)
+crc_50 <- first_occurence_age(ICD10 = crc_codes_icd10_filtered,
+                              GP = crc_codes_gp_filtered$code,
+                              cancer = crc_codes_icd10_filtered,
+                              age_threshold = 50,
+                              p = p_sym_filtered_50)
+
+#3B. Add crc data to participants table
+#======================================
+#required files:
+death <- read.csv('death_death.csv') #date of death - only columns used for analysis were participant ID and date of death formatted: year-month-day
+death_cause <- read.csv('death_death_cause.csv') #cause of death - only columns used were participant ID and 'cause_icd10' which contains: ICD10code<space>description of code
+
+#split death_cause column of causes into ICD10 code and description
+library(stringr)
+death_cause[c('code', 'cause')] <- str_split_fixed(death_cause$cause_icd10, ' ', 2)
+#reformat codes into 3 characters to match other ICD10 codes
+for (i in 1:nrow(death_cause)) {death_cause$code[i] <- substr(death_cause$code[i], 1, 3)}
+#add date of death
+death_cause <- left_join(death_cause,death[,c(2,6)]) #col 2 = ID, 6 = date of death
+
+#filter both tables to only include symptomatic participants:
+library(dplyr)
+death_00 <- filter(death, eid %in% p_sym_filtered_00$eid)
+death_40 <- filter(death, eid %in% p_sym_filtered_40$eid)
+death_50 <- filter(death, eid %in% p_sym_filtered_50$eid)
+death_cause_00 <- filter(death_cause, eid %in% p_sym_filtered_00$eid)
+death_cause_40 <- filter(death_cause, eid %in% p_sym_filtered_40$eid)
+death_cause_50 <- filter(death_cause, eid %in% p_sym_filtered_50$eid)
+
+#a function to add all the CRC data about participants to a dataframe 'p':
+add_crc <- function(p_sym_filtered_xx, crc_xx, death_cause_xx) { 
+  #create a table including id, DoB, symptom date and symptom age:
+  p <- p_sym_filtered_xx[,c(1,9,3,10)]
+  
+  #add CRC date, source of info (e.g. GP, cancer registry) and age at diagnosis, and rename some stuff:
+  p <- left_join(p, crc_xx) %>% rename('sym_date' = event_dt,
+                                       'crc_date' = date,
+                                       'crc_source' = source)
+  
+  #add whether participants had CRC listed as cause of death:
+  p$crc_death[p$eid %in% death_cause_xx$eid[death_cause_xx$code %in% crc_codes_icd10_filtered]] <- 1
+  p$crc_death[is.na(p$crc_death)] <- 0
+  #add date and age of death for all participants
+  p <- left_join(p, death_cause_xx[,c(2,9)]) %>% rename('death_date' = date_of_death)
+  p$death_age <- lubridate::time_length(difftime(p$death_date,p$dob),"years")
+  #if participants died from CRC but there is no other record of having CRC, fill in CRC date and age with death date and age:
+  cdo <- p$eid[p$crc_death == 1 & is.na(p$crc_date)]
+  p$crc_date[p$eid %in% cdo] <- p$death_date[p$eid %in% cdo]
+  p$crc_source[p$eid %in% cdo] <- 'Death'
+  p$crc_age[p$eid %in% cdo] <- p$death_age[p$eid %in% cdo]
+  
+  #calculate time between first symptom and CRC in days:
+  p$time_diff <- lubridate::time_length(difftime(p$crc_date, p$sym_date),"days")
+  #calculate time between first symptom and death in days
+  p$time_diff_death <- lubridate::time_length(difftime(p$death_date, p$sym_date),"days")
+  
+  #determine whether participants are cases or controls
+  p$case[p$time_diff > 0 & p$time_diff <= 730] <- '1' #case
+  p$case[p$time_diff > 730] <- '0' #control
+  p$case[is.na(p$time_diff)] <- '0'
+  p$case[p$time_diff <= 0] <- 'exclude' #exclude
+  p$case[p$time_diff_death <= 730 & p$crc_death == 0] <- 'exclude'
+  
+  #reformat some stuff
+  p$crc_age <- as.integer(p$crc_age)
+  p$death_age <- as.integer(p$death_age)
+  
+  return(p)
+}
+
+#make dataframe of all symptomatic patients, symptom date/age, CRC date/age, death date/age,
+#whether death was due to CRC, time between symptom and CRC, and whether case/control/exclude
+p_00 <- add_crc(p_sym_filtered_00, crc_00, death_cause_00)
+p_40 <- add_crc(p_sym_filtered_40, crc_40, death_cause_40)
+p_50 <- add_crc(p_sym_filtered_50, crc_50, death_cause_50)
+
+#3C: Decide which age threshold to use based on density plots comparing age at first symptom in cases/controls
+#=============================================================================================================
+density0 <- p_00 %>% ggplot() +
+  aes(x = sym_age, fill = as.factor(case)) +
+  geom_density(alpha = 0.4) + scale_fill_discrete(name="",labels=c("control","case")) +
+  xlab('age at first CRC symptom') + geom_vline(xintercept = 40) + geom_vline(xintercept = 50)
+
+density40 <- p_40 %>% ggplot() +
+  aes(x = sym_age, fill = as.factor(case)) +
+  geom_density(alpha = 0.4) + scale_fill_discrete(name="",labels=c("control","case")) +
+  xlab('age at first CRC symptom')
+
+density50 <- p_50 %>% ggplot() +
+  aes(x = sym_age, fill = as.factor(case)) +
+  geom_density(alpha = 0.4) + scale_fill_discrete(name="",labels=c("control","case")) +
+  xlab('age at first CRC symptom')
+
+#going with age threshold 40 because it increases case to control ratio without excluding too many participants
+
+#4A. Add UKBB variables
+#=====================
+#import some tables of UKBB variables for all UKBB participants:
+var <- read.csv('participant_variables.csv') #lifestyle variables and participant characteristics
+fh <- read.csv('family_history.csv') #after editing the analysis, I decided to include family history, which is the only reason it's in a different table to other variables
+
+#list of UKBB variable names/codes in the table vs. what I renamed them, for reference:
+UKBB_var_names <- list('eid' = 'eid',
+                       'age' = 'p21022',
+                       'dob_m' = "p52",
+                       'dob_y' = "p34",
+                       'sex' = "p31",
+                       'TDI' = "p189",
+                       'BMI' = "p21001_i0",
+                       'waist_circumference' = "p48_i0",
+                       'ever_smoked' = "p20160_i0",
+                       'delete_this' = "p20116_i1", #'delete' variables were included by accident or just not useful
+                       'smoking_status' = "p20116_i0",
+                       'delete' = "p1239_i0",
+                       'delete' = "p3456_i0",
+                       'alcohol_intake' = "p1558_i0",
+                       'diabetes' = "p2443_i0",
+                       'processed_meat_intake' = "p1349_i0",
+                       'PC1' = "p22009_a1",
+                       'PC3' = "p22009_a3",
+                       'PC2' = "p22009_a2",
+                       'PC4' = "p22009_a4",
+                       'PC5' = "p22009_a5")
+
+#renaming UKBB variables in the dataframe:
+colnames(var) <- c('eid','recruitment_age','delete','delete','sex','TDI','BMI',
+                   'waist_circumference','ever_smoked','delete_this',
+                   'smoking_status','delete','delete','alcohol_intake',
+                   'diabetes','processed_meat_intake','PC1','PC3','PC2',
+                   'PC4','PC5')
+#delete unnecessary variables:
+var <- var[,-c(3,4,10,12,13)]
+
+#add variables to the dataframe of participants (the one with all the CRC/symptom info)
+add_variables <- function(p_xx) {
+  p_xx_v <-  left_join(p_xx, var)
+  
+  #some variables had 'NA' if participants didn't answer whereas some had e.g.
+  #'prefer not to answer'. Change to be compatible:
+  p_xx_v$ever_smoked[p_xx_v$ever_smoked == ''] <- NA
+  p_xx_v$smoking_status[p_xx_v$smoking_status == 'Prefer not to answer'] <- NA
+  p_xx_v$alcohol_intake[p_xx_v$alcohol_intake == 'Prefer not to answer'] <- NA
+  p_xx_v$diabetes[p_xx_v$diabetes == 'Prefer not to answer'] <- NA
+  p_xx_v$diabetes[p_xx_v$diabetes == 'Do not know'] <- NA
+  p_xx_v$processed_meat_intake[p_xx_v$processed_meat_intake == 'Prefer not to answer'] <- NA
+  p_xx_v$processed_meat_intake[p_xx_v$processed_meat_intake == 'Do not know'] <- NA
+  
+  return(p_xx_v)
+}
+
+p_40_v <- add_variables(p_40)
+
+#4B. Add family history
+#=====================
+fh_40 <- filter(fh, eid %in% p_40_v$eid)
+
+add_fh <- function(fh_xx, p_xx_v) {
+  fh <- fh_xx
+  colnames(fh) <- c('eid','fh_mat','fh_pat')
+  #UKBB self-reported family history is formatted as a list of conditions which participants said their parent had. Use grep to find entries containing bowel cancer:
+  fh$fh_mat[grep('Bowel cancer', fh$fh_mat)] <- 1
+  fh$fh_pat[grep('Bowel cancer', fh$fh_pat)] <- 1
+  fh[,2:3][fh[,2:3] != 1] <- 0 #if participant did not report mother or father having bowel cancer, set value to 0
+  
+  p <- dplyr::left_join(p_xx_v, fh)
+  
+  p$fh_mat<- as.integer(p$fh_mat)
+  p$fh_pat<- as.integer(p$fh_pat)
+
+  #new variable which is 0 if no parents had bowel cancer, or 1, or 2:
+  p$fh <- p$fh_mat + p$fh_pat
+  
+  return(p)
+}
+
+p_40_v <- add_fh(fh_40, p_40_v)
+
+#4C. Add which symptom type each participant had
+#==========================================
+#symptom_type is a dataframe with the category that each read code falls into
+#it's either 1 or NA for each category. change it to 1 or 0, then convert to an integer, so it can be used for maths later:
+
+#TODO: insert this later it's messing up github formatting :(
+
+
+                            
+
+
+
+                            
