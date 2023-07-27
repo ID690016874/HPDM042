@@ -620,5 +620,213 @@ bottom_quin_inc_40e <- binaryci(p_40_ve$case[p_40_ve$grs_quintile==1])
 top_quin_inc_40m <- binaryci(p_40_vm$case[p_40_vm$grs_quintile==5])
 bottom_quin_inc_40m <- binaryci(p_40_vm$case[p_40_vm$grs_quintile==1])
 
+#6C. Cox proportional hazards modelling and survival curve
+#==========================================================
+#IMPORTANT: This section needs to be run on an up-to-date version of R if possible, otherwise package dependencies etc. cause lots of errors.
 
+#Required packages (uncomment to install)
+#========================================
+#install.packages('survminer')
+#install.packages('ggpubr')
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(survminer)
+
+#Create dataframe for survival analysis
+#-----------------------------------------
+x <- 2 #number of years to measure CRC incidence over
+quin_df <- data.frame(grs_quintile = c(5,4,3,2,1)) #a dataframe containing 1 column with numbers 5-1 in rows
+
+make_survframe <- function(p_xx_v) {
+  #copy participant dataframe:
+  rainbow_40 <- p_xx_v
+  rainbow_40$death_t <- lubridate::time_length(difftime(rainbow_40$death_date, rainbow_40$sym_date),"days") #death_t = time between first symptom and death
+  rainbow_40$t <- lubridate::time_length(difftime(rainbow_40$crc_date, rainbow_40$sym_date), "days") #t = time between first symptom and cancer
+  
+  #make dataframe for cumulative hazards plot
+  survframe<- rainbow_40 %>% select('eid','sym_age','crc_age','grs','grs_quintile','zscore','death_t','t')
+  survframe <- survframe %>% mutate(status=!is.na(crc_age)) #status is TRUE if they ever had CRC and FALSE if they didn't.
+  survframe$t[is.na(survframe$t)] <- 729.5 #if participants did not get cancer, set t = 729.5 (mean length in days of 2 years)
+  survframe$t[survframe$t>=729.5] <- 729.5 #if participants got cancer >=2 years after symptom then this is outside the time period I want to plot, set t = 2.
+  survframe$t <- pmin(survframe$t,survframe$death_t,na.rm=TRUE) #set t to the minimum of t and the death date. t will then be: 729.5, if they lived 2 years cancer free OR time between symptom and cancer diagnosis date if they got cancer OR or time between symptom and death
+  survframe$status[survframe$t>=729.5] <- FALSE #status currently = TRUE for anyone who got CRC. change to false if they got CRC after 2 years
+  survframe$status <- as.integer(survframe$status) #change TRUE and FALSE in status to 1 and 0
+
+  return(survframe)
+}
+
+survframe_e <- make_survframe(p_40_ve)
+survframe_m <- make_survframe(p_40_vm)
+  
+#Run Cox PH model
+#---------------
+library(survival)
+res.cox_e <- coxph(Surv(t, status) ~ grs_quintile, data =  survframe_e)
+res.cox_m <- coxph(Surv(t, status) ~ grs_quintile, data =  survframe_m)
+
+#format Cox proportional hazards model for cumulative plot:
+fit_stuff <- function(res.cox_x) {
+  fit <- survfit(res.cox_x, newdata = quin_df)
+  #turn 'upside down' for the plot (otherwise it plots highest GRS quintile in the lowest band on the graph)
+  fit2 <- fit
+  fit2$surv <- 1-fit2$surv
+  fit2$lower <- 1-fit2$lower
+  fit2$upper <- 1-fit2$upper
+  return(fit2)
+}
+
+fit_m <- fit_stuff(res.cox_m)
+fit_e <- fit_stuff(res.cox_e)
+
+
+#Plot cumulative hazards/surivival curve
+#=======================================
+#graph theme by Harry Green:
+HGtheme=theme_bw()+
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+
+rainbow_plot <- function(survframe_x, fit_x) {
+  rainbow_surv <- ggsurvplot(fit_x, xlim = c(0, max(survframe_x$t)), conf.int = TRUE,
+                             legend.labs=c("Quintile 5","Quintile 4","Quintile 3","Quintile 2","Quintile 1"),
+                             risk.table = TRUE, data=quin_df, legend='none',
+                             legend.title='GRS Quintile',
+                             palette=c('#FF0018','#FFA52C','#008018','#0000F9','#86007D'),
+                             ggtheme=HGtheme, ylab='CRC incidence rate', xlab='time since first CRC symptom (years)')
+  rainbow_surv$data.survplot$surv <- 1-rainbow_surv$data.survplot$surv
+  rainbow_surv$data.survplot$lower <- 1-rainbow_surv$data.survplot$lower
+  rainbow_surv$data.survplot$upper <- 1-rainbow_surv$data.survplot$upper
+  rainbow_surv$plot$data$surv <- 1-rainbow_surv$plot$data$surv
+  rainbow_surv$plot$data$lower <- 1-rainbow_surv$plot$data$lower
+  rainbow_surv$plot$data$upper <- 1-rainbow_surv$plot$data$upper
+  rainbow_surv$plot <- rainbow_surv$plot + scale_y_continuous(breaks = c(0,0.005, 0.01, 0.015,
+                                                                         0.02), limits=c(0, 0.027),
+                                                              labels = scales::percent) +
+    scale_x_continuous(breaks = c(0, 364.75, 729.5), labels = c(0,1,2))
+  return(rainbow_surv$plot)
+}
+
+rainbow_plot_e <- rainbow_plot(survframe_e, fit_e)
+rainbow_plot_m <- rainbow_plot(survframe_m, fit_m)
+
+
+
+
+#7A. Do logistic  regression testing
+#==================================
+#IMPORTANT: Back to R version 4.1.1!
+
+#=================================
+#make a list with each variable plus its p value and odds ratio for predicting cases or controls:
+#-------------------------
+library(dplyr)
+or_list <- function(p_xx_v, col_list) {
+  lr <- replicate(length(col_list), list(OR = NA, L95 = NA, U95 = NA, p = NA), simplify = FALSE)
+  for (i in 1:length(col_list)) {
+    x <- colnames(p_xx_v)[col_list][i]
+    basemod <- glm(noquote(paste0('case~',x)), data=p_xx_v, family=binomial) %>% summary()
+    lr[[i]][[1]] <- round(exp(basemod$coefficients[2,1]),2)
+    lr[[i]][[2]] <- round(exp(basemod$coefficients[2,1]-1.96*basemod$coefficients[2,2]),2)
+    lr[[i]][[3]] <- round(exp(basemod$coefficients[2,1]+1.96*basemod$coefficients[2,2]),2)
+    lr[[i]][[4]] <- as.character(signif(basemod$coefficients[2,4],2))
+    names(lr)[i] <- x
+  }
+  return(lr)
+}
+
+#final list of variables being tested, for reference:
+var_list <- c('sex','sym_age','TDI','BMI','waist_circumference','ever_smoked','smoking_status','alcohol_intake','diabetes','processed_meat_intake','fh_mat','fh_pat','fh','weightloss','loss_appetite','abdo_mass','abdo_pain','rectal_bloodless','fob','change_bowel_habit','haemoglobin','grs','zscore','grs_quintile')
+
+lr_40_e <- or_list(p_40_ve, c(4,7,16:23,26:30,32:37,43:45)) #indexing because some columns don't contain variables, & some variables don't contain enough data
+lr_40_m <- or_list(p_40_vm, c(4,7,16:23,26:30,32:37,43:45))
+
+#make list of only variables significantly associated with cases:
+#----------------------------------------------------------------
+#significant association meaning p <= 0.00208 (Bonferroni correction for 24 tests) and odds ratio confidence intervals >1
+
+lrp_40_e <- list(sex = lr_40_e$sex, sym_age = lr_40_e$sym_age, waist_circumference =
+                   lr_40_e$waist_circumference, smoking_status = lr_40_e$smoking_status,
+                 ever_smoked = lr_40_e$ever_smoked, rectal_bloodloss = lr_40_e$rectal_bloodloss,
+                 change_bowel_habit = lr_40_e$change_bowel_habit, grs = lr_40_e$grs, fob = lr_40_e$fob)
+
+lrp_40_m <- list(sex = lr_40_m$sex, sym_age = lr_40_m$sym_age, smoking_status = lr_40_m$smoking_status,
+                 rectal_bloodloss = lr_40_m$rectal_bloodloss, change_bowel_habit = 
+                   lr_40_m$change_bowel_habit, grs = lr_40_m$grs, fob = lr_40_m$fob)
+
+#zscore and grs quintile were also significant for both cohorts, but not included because not required for later stages of analysis
+
+#7B. Get ROCAUC measures for signficantly associated variables
+#=========================================================
+# Takes a formula and a data frame and returns a roc object (Harry Green's code)
+#install.packages("pROC")
+library(pROC)
+rocauc=function(form,dataframe,pt){
+  logit <- glm(form, data = dataframe, family = "binomial")
+  prob = predict(logit, newdata = dataframe, type = "response")
+  if (pt == TRUE) {
+    roc = roc(dataframe$case ~ prob, plot = TRUE, print.auc = TRUE, ci=TRUE)
+  } else {
+    roc = roc(dataframe$case ~ prob, plot = FALSE, print.auc = TRUE, ci=TRUE)}
+  return(roc)
+}
+
+#add ROCAUCs to list of significantly associated variables
+#---------------------------------------------------------
+add_rocauc <- function(p_xx_v, lrp_xx) {
+  for (i in 1:length(lrp_xx)) {
+    x <- names(lrp_xx)[i]
+    basemod <- rocauc(noquote(paste0('case~',x)), p_xx_v, F)
+    lrp_xx[[i]][[5]] <- round(basemod$ci[2],2)
+    lrp_xx[[i]][[6]] <- round(basemod$ci[1],2)
+    lrp_xx[[i]][[7]] <- round(basemod$ci[3],2)
+  }
+  return(lrp_xx)
+}
+
+lrp_40_e <- add_rocauc(p_40_ve, lrp_40_e)
+lrp_40_m <- add_rocauc(p_40_vm, lrp_40_m)
+
+#8A. Build the risk model by adding variables which cause biggest jump in ROCAUC
+#==============================================================================
+rocauc_jump <- function(lrp_xx, p_xx_v) {
+  #character vector of named variables:
+  factors <- names(lrp_xx)
+  #create empty list:
+  rocp <- replicate(length(lrp_xx), list(ROC = 0, LB = 0, UB = 0), simplify = FALSE)
+
+  for (i in 1:length(lrp_xx)) { #e.g., 1:7
+    for (j in 1:length(factors)) { #'factors' decreases in size with each loop, so this will be 1:7, then 1:6, then 1:5...
+      
+      #print out which model is currently being tested + the ROCAUC of that model:
+      print(paste0(names(rocp)[1:i-1],collapse='+'))
+      print(factors[j])
+      print(paste0('case~',paste0(names(rocp)[1:i-1],collapse='+'),'+',factors[j]))
+      
+      baseauc <- rocauc(paste0('case~',paste0(names(rocp)[1:i-1],collapse='+'),'+',factors[j]), p_xx_v, FALSE)
+      print(baseauc$ci[2])
+      print('-------------------')
+      
+      if (((baseauc$ci[2] == rocp[[i]]$ROC) == TRUE) && ((names(rocp)[i] != factors[j]) == TRUE)) {
+        warning(paste('ROC AUC of',factors[j],'matched',names(rocp)[i]))
+        #this warning means two different risk models share the highest ROCAUC (so far), so one of them isn't being included in the calculation
+        
+      } else if ((baseauc$ci[2] > rocp[[i]]$ROC) == TRUE) {
+        rocp[[i]]$ROC <- baseauc$ci[2]
+        rocp[[i]]$LB <- baseauc$ci[1]
+        rocp[[i]]$UB <- baseauc$ci[3]
+        names(rocp)[i] <- factors[j]
+        maxf <- factors[j]
+      }
+    }
+    #remove the factor with the best ROC AUC from factors
+    factors <- factors[factors != maxf]
+  }
+  return(rocp)
+}
+
+rocauc_irm_40_e <- rocauc_jump(lrp_40_e[c(1:4,6:8)],p_40_ve)
+rocauc_irm_40_m <- rocauc_jump(lrp_40_m[c(1:6)],p_40_vm)
 
