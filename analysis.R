@@ -443,9 +443,182 @@ p_40_v <- add_fh(fh_40, p_40_v)
 
 #TODO: insert this later it's messing up github formatting :(
 
+#add which symptom(s) each participant had as a variable:
+add_symptoms <- function(p_xx_v, p_sym_filtered_xx) {
+  #get read 2 and 3 codes for all participants
+  p_st2 <- left_join(p_xx_v[,1], p_sym_filtered_xx) %>%
+    distinct(eid, read_2)
+  p_st3 <- left_join(p_xx_v[,1], p_sym_filtered_xx) %>%
+    distinct(eid, read_3)
+  
+  #add symptom types to each read code
+  p_st2 <- p_st2[!is.na(p_st2$read_2),]
+  p_st2 <- rename(p_st2, 'readcode'=read_2)
+  p_st2 <- left_join(p_st2, symptom_type)
+  
+  p_st3 <- p_st3[!is.na(p_st3$read_3),]
+  p_st3 <- rename(p_st3, 'readcode'=read_3)
+  p_st3 <- left_join(p_st3, symptom_type)
+  
+  #add together total number of each symptom type for each participant
+  p_st <- rbind(p_st2, p_st3)
+  p_st <- p_st %>% 
+    group_by(eid) %>% 
+    summarise(across(2:13, sum))
+  
+  #if any value in the symptom columns is >1, convert it to 1
+  #(don't need to know how many times one symptom type, e.g. weight loss, was
+  #recorded for one participant, just that it was recorded)
+  p <- left_join(p_xx_v, p_st)
+  p[,32:43][p[,32:43] > 1] <- 1
+  p[,32:43][is.na(p[,32:43])] <- 0
+  
+  return(p)}
 
+p_40_v <- add_symptoms(p_40_v, p_sym_filtered_40)
                             
+#4D. Add haemoglobin levels
+#==========================
+haem <- read_GP(c('44TC.','XaBLm'))
+haem$value1 <- as.numeric(haem$value1)
+haem <- haem[haem$value1 < 20 & haem$value1 > 1,]
+haem <- filter(haem, !is.na(value1))
+
+add_haem <- function(p_xx_v) {
+  p <- p_xx_v %>%
+    left_join(haem[,c(1,3,6)]) %>%
+    rename('haem_level'=value1, 'haem_date'=event_dt)
+  
+  #calculate time difference between haemoglobin measurement and first symptom:
+  p$haem_diff <- lubridate::time_length(difftime(p$sym_date, p$haem_date),"days")
+  #change all time difference measurements to a positive number
+  p$haem_diff <- sqrt(p$haem_diff^2)
+  
+  #if a participant has multiple haemoglobin measures, only use the one closest
+  #to symptom date (also remove some duplicated records that somehow snuck in here)
+  p$haem_diff[is.na(p$haem_diff)] <- 0
+  p <- p %>% group_by(eid) %>% top_n(-1, haem_diff) %>%
+    distinct(across(-crc_source), .keep_all = TRUE) %>% select(!(haem_diff))
+  
+  return(p)
+}
+
+p_40_v <- add_haem(p_40_v)
+
+#NOTE: these haemoglobin measurements were taken an average of 1153.952
+#days away from first symptom (3 years). therefore doing something sensible like only
+#including haemoglobin levels measured 2 years of either side of symptom date reduces
+#participants with haemoglobin levels to only 2 participants.
+#Even with this there were so few haemoglobin measurements that they couldn't be meaningfully analysed with logistic regression
+#so haemoglobin level was not included as one of the 24 variables in the study. It's in the table anyway because
+
+#4E. reorder columns
+#==================
+p_40_v <- p_40_v[,c(1,2,14,15,13,3:12,16:23,45,44,29:31,32:43,24:28)]
+
+#4F. exclude participants who don't meet criteria for case/control
+#================================================================
+p_40_v <- p_40_v[p_40_v$case != 'exclude',]
+p_40_v$case <- as.integer(p_40_v$case)
+
+#also exclude 'rigidity' symptom variable as so few participants had rigidity as a symptom:
+p_40_v <- p_40_v[,-40]
+#at this point I used participant IDs to exclude any participants who only had rigidity as a symptom and no other symptoms
+#code not shown here for anonymity reasons
+
+#4G. Convert some categorical variables to factor variables
+#========================================================
+factorise <- function(p_xx_v) {
+    p <- p_xx_v
+    p$ever_smoked <- factor(p$ever_smoked)
+    p$smoking_status <- factor(p$smoking_status, levels=c("Never","Previous","Current"))
+    p$alcohol_intake <- factor(p$alcohol_intake,
+                               levels = c('Never','Special occasions only',
+                                          'One to three times a month',
+                                          'Once or twice a week',
+                                          'Three or four times a week',
+                                          'Daily or almost daily'))
+    p$processed_meat_intake <- factor(p$processed_meat_intake,
+                                      levels = c('Never','Less than once a week',
+                                                 'Once a week','2-4 times a week',
+                                                 '5-6 times a week',
+                                                 'Once or more daily'))
+    return(p)
+}
+
+p_40_v <- factorise(p_40_v)
+
+#5. Split cohort depending on ancestry and relatedness before working out GRS quintiles & other descriptive stats
+#=====================================================
+#required files:
+#==============
+eur_unr <- read.table('unrelated_european_ukbb_participants.txt', header = TRUE)
+#==============
+#split cohort dataframe into 2 depending on ancestry & relatedness:
+p_40_vm <- filter(p_40_v, !(eid %in% eur_unr$n_eid)) #mixed ancestry (this will include some white European individuals excluded from the other list due to relatedness)
+p_40_ve <- filter(p_40_v, eid %in% eur_unr$n_eid) #white European ancestry, not including individuals related to 1st or 2nd degree
+
+#6A. Generate polygenic risk score (PRS) (in this code the nomenclature used was genetic risk score (GRS))
+#====================================
+#generate GRS for all UKBB participants using source_url("https://raw.githubusercontent.com/hdg204/Rdna-nexus/main/install.R")
+#note this requires a tab-separated table of risk-associated variants, with the following columns: chr, bp, other, effect, weight
+#(other and effect refer to the alleles which do or don't impact CRC risk, weight is the beta)
+grs <- generate_grs('207_snp_list.tsv') 
+
+#add GRS to participant dataframe:
+add_grs <- function(p_xx_v) {
+  #add GRS to participants dataframe
+  p_grs <- filter(grs$grs, eid %in% p_xx_v$eid)
+  p <- left_join(p_xx_v, p_grs)
+  
+  #calculate z score (like GRS but scaled, so 1 unit increase = 1 standard deviation increase):
+  gm <- mean(p$grs, na.rm = T)
+  gsd <- sd(p$grs, na.rm = T)
+  p$zscore <- (p$grs - gm)/gsd
+  
+  #divide GRS into quintiles:
+  scorequin <- quantile(p$grs, probs = seq(0, 1, 1/5), na.rm = T)
+  p <- p %>% mutate(grs_quintile=NA)
+  p$grs_quintile[p$grs<scorequin[2]] <- 1
+  p$grs_quintile[p$grs<scorequin[3] & p$grs>scorequin[2]] <- 2
+  p$grs_quintile[p$grs<scorequin[4] & p$grs>scorequin[3]] <- 3
+  p$grs_quintile[p$grs<scorequin[5] & p$grs>scorequin[4]] <- 4
+  p$grs_quintile[p$grs>scorequin[5]] <- 5
+  
+  return(p)
+}
+
+p_40_ve <- add_grs(p_40_ve)
+p_40_vm <- add_grs(p_40_vm)
+
+#plot GRS distribution
+#--------------------
+grs_dist <- ggplot(p_40_ve, aes(x=grs, fill=as.factor(case))) + geom_density(alpha = 0.4) +
+  xlab('GRS') + scale_fill_discrete(name='',labels = c('control','case')) + scale_x_continuous(n.breaks = 15) +
+  geom_vline(xintercept = mean(p_40_ve$grs[p_40_ve$case == 0], na.rm=T), linetype = 2) +
+  geom_vline(xintercept = mean(p_40_ve$grs[p_40_ve$case == 1], na.rm=T), linetype = 3)
+
+grs_dist <- ggplot(p_40_vm, aes(x=grs, fill=as.factor(case))) + geom_density(alpha = 0.4) +
+  xlab('GRS') + scale_fill_discrete(name='',labels = c('control','case')) + scale_x_continuous(n.breaks = 15) +
+  geom_vline(xintercept = mean(p_40_vm$grs[p_40_vm$case == 0], na.rm=T), linetype = 2) +
+  geom_vline(xintercept = mean(p_40_vm$grs[p_40_vm$case == 1], na.rm=T), linetype = 3)
+
+#6B. Get CRC incidence rate by GRS quintile
+#===========================================
+#Takes a binary variable and returns a proportionality test to find the confidence interval. Returns it as a string (adapted from HG's code)
+binaryci <- function(binarylist){
+  binarylist=binarylist[!is.na(binarylist)]
+  test1=100*prop.test(sum(binarylist), length(binarylist), conf.level=0.95)$conf.int[c(1,2)]%>%as.numeric()%>%signif(2)
+  test2=100*prop.test(sum(binarylist), length(binarylist), conf.level=0.95)$estimate%>%as.numeric()%>%signif(2)
+  return(paste(as.character(test2),'% (',as.character(test1[1]),'%-',as.character(test1[2]),'%)',sep=''))
+}
+
+#get incidence rate for top and bottom quintile:
+top_quin_inc_40e <- binaryci(p_40_ve$case[p_40_ve$grs_quintile==5])
+bottom_quin_inc_40e <- binaryci(p_40_ve$case[p_40_ve$grs_quintile==1])
+
+top_quin_inc_40m <- binaryci(p_40_vm$case[p_40_vm$grs_quintile==5])
+bottom_quin_inc_40m <- binaryci(p_40_vm$case[p_40_vm$grs_quintile==1])
 
 
 
-                            
