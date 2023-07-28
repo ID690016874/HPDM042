@@ -17,6 +17,6 @@ Contents:
 
 The <b>find-read-codes</b> folder contains an R function built for this analysis & a descriptive README file.
 
-<b>read_codes_list</b> contains the 59 read codes for CRC symptoms which I identified through use of the function. It does not contain read codes provided by other researchers at the University of Exeter and University College London and used in this study.
+<b>read_codes_list</b> contains the 59 read codes for CRC symptoms which I identified through use of the function. It does not contain read codes provided by other researchers at the University of Exeter and University College London which were also used in this study.
 
 <b>nonsignificant_variables.csv</b> are the results of logistic regression and ROCAUC testing for the variables which were not significantly associated with CRC diagnosis, in terms of p-value and odds ratio.
