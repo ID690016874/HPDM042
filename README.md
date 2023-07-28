@@ -1,5 +1,5 @@
 # Repository contents
-analysis.R is contains all the code used for the research project. It mostly runs on R version 4.1.1.
+<b>analysis.R</b> is contains all the code used for the research project. It mostly runs on R version 4.1.1.
 
 It's split into the following sections. Some sections require files as input, and sometimes analysis decisions were made based on descriptive graphs of the data. I.e. the code isn't designed to run from beginning to end non-stop & will probably need adapting to different datasets.
 
@@ -15,6 +15,8 @@ Contents:
 9. Building the integrated risk model based on AIC
 10. Calculate ROCAUC for the final risk model and GRS/PRS alone
 
-The find-read-codes folder contains an R function built for this analysis & a descriptive README file.
+The <b>find-read-codes</b> folder contains an R function built for this analysis & a descriptive README file.
 
-read_codes_list contains the 59 read codes for CRC symptoms which I identified through use of the function. It does not contain read codes provided by other researchers at the University of Exeter and University College London and used in this study.
+<b>read_codes_list</b> contains the 59 read codes for CRC symptoms which I identified through use of the function. It does not contain read codes provided by other researchers at the University of Exeter and University College London and used in this study.
+
+<b>nonsignificant_variables.csv</b> are the results of logistic regression and ROCAUC testing for the variables which were not significantly associated with CRC diagnosis, in terms of p-value and odds ratio.
