@@ -16,3 +16,5 @@ Contents:
 10. Calculate ROCAUC for the final risk model and GRS/PRS alone
 
 The find-read-codes folder contains an R function built for this analysis & a descriptive README file.
+
+read_codes_list contains the 59 read codes for CRC symptoms which I identified through use of the function. It does not contain read codes provided by other researchers at the University of Exeter and University College London and used in this study.
